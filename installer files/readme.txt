@@ -1,10 +1,10 @@
-20/6/2017 Cam86 ASCOM driver v.0.7.2L Readme
+20/6/2022 Cam86 ASCOM driver v.0.9.0 Readme
 
 Directory description:
 Default installation directory: C:\Program Files\Common Files\ASCOM\Camera\cam86
 FTD2XX_NET.dll  NET interface for FTDI ftd2xx.dll
-cam86.dll     cam86 driver, high-level interaction with camera (C#, Visual Studio 2015 project)  
-cam85ll.dll   cam86 driver, low-level interaction with camera (Delphi 7 project)
+ASCOM.cam86.Camera.dll    cam86 driver, high-level and low-level interaction with camera (C#, Visual Studio 2017 project)  
+
 
 Release history:
 0.1  - [1] Initial release for cam86 based on cam85m v.0.1 ASCOM driver
@@ -47,10 +47,10 @@ Release history:
         Add a button to minimise the settings form
 	Add a button to toggle between image info only or settings as well when camera is connected
 0.7.3   Bug fix release to solve the "white line" issue when cooling is used
-
-
+0.9.0   Default not showing the setting window so N.I.N.A won't freeze.
+          Fully intergrate with FTD2XX.NET, No Low Lever DLL needed, and can run at both 64bit and 32bit system
 Known issues:
-na
+don't check "Open on start" check box, or your N.I.N.A will freeze.
 
 Requirements:
 Installed FTDI D2XX Driver (http://www.ftdichip.com/Drivers/D2XX.htm, version 2.08.24 or newer)
@@ -63,14 +63,15 @@ Installation instructions:
 1) Install Net Framework 3.5 SP1 (http://www.microsoft.com/en-us/download/details.aspx?id=25150), install ASCOM 6 SP1 platform (http://ascom-standards.org/Downloads/Index.htm);
 2) Connect cam86 to PC and install FTDI driver ver. 2.08.24 (http://www.ftdichip.com/Drivers/D2XX.htm); In Device Manager find 2 new devices: USB Serial Converter A, USB Serial Converter B, uncheck "Load VCP" checkbox in the device properties on Advanced tab;
 3) If you have installed previous version of Cam86 ASCOM driver - uninstall it through Start-Control Panel-Add & Remove Programs.
-4) Run cam86_v0.1_setup.exe, next-next-next
+4) Run cam86_v0.9_setup.exe, next-next-next
 5) If cam86 is correctly flashed through MProg 3.5 and AVR cam86 Programmer utility (http://astroccd.org/2013/01/cam8_mprog_flashing/) you can connect cam86 like a ASCOM compatible camera to your software.
 
 Uninstall instructions:
-From Start-Control Panel-Add & Remove Programs select ASCOM cam86 Camera Driver 0.1 and click to Remove button.
+From Start-Control Panel-Add & Remove Programs select ASCOM cam86 Camera Driver 0.9 and click to Remove button.
 
 Authors:
 Camera hardware and low-level camera interaction - Gilmanov Rim, grim63 (at) yandex.ru
 Camera high-level interaction with ASCOM - Vakulenko Sergiy, sergiy.vakulenko (at) gmail.com 
 Modifications/extensions to the firmware/low-level driver/ASCOM driver- Luka Pravica, lukatravel (at) hotmail.com
+ASCOM Driver Modifications with C# low-level camera interaction - Tinylib,3dgans (at) outlook.com
 Additional information by this project you can find at www.astroccd.org

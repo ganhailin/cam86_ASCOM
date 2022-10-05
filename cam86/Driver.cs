@@ -61,10 +61,12 @@
 // 30/3/2018    Luka Pravica     0.8.2   Fix small interface bug where the humidity was hidden
 //                                       Added April Fools' Day joke :-)
 // 2/6/2019     Luka Pravica     0.8.3   Added delay at camera connection - after powering on the camera it seems to take several seconds before camera starts responding
-//                                       
+// 
+// 6/10/2022    Tinylib          0.9.0   Default not showing the setting window so N.I.N.A won't freeze.
+//                                       Fully intergrate with FTD2XX.NET, No Low Lever DLL needed, and can run at both 64bit and 32bit system
 // --------------------------------------------------------------------------------
 
-/*  Copyright © 2017 Gilmanov Rim, Vakulenko Sergiy and Luka Pravica
+/*  Copyright ?2017 Gilmanov Rim, Vakulenko Sergiy and Luka Pravica
    
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -99,6 +101,7 @@ using System.Collections;
 using System.Threading;
 using System.Timers;
 using System.Reflection;
+using FTD2XX_NET;
 
 namespace ASCOM.cam86
 {
@@ -107,7 +110,7 @@ namespace ASCOM.cam86
     /// </summary>
     [Guid("677df06a-d784-4a3b-9028-d597e58131a4")]
     [ClassInterface(ClassInterfaceType.None)]
-    public class Camera : ICameraV2
+    public class Camera : ICameraV3
     {
         /// <summary>
         /// ASCOM DeviceID (COM ProgID) for this driver.
@@ -118,12 +121,12 @@ namespace ASCOM.cam86
         internal const int DriverInitTimeout_ms = 10000; // maximum time in ms for the camera initialisation
 
         bool cameraStartingUp = true;
-        int startUpDelay = 100; // 100ms delay after each command during the startup period. 
+        int startUpDelay = 0; // 100ms delay after each command during the startup period. 
 
         /// <summary>
         /// Driver description that displays in the ASCOM Chooser.
         /// </summary>
-        internal static string driverVersion = "0.8.3";
+        internal static string driverVersion = "0.9.0";
         private static string driverDescription = "Cam86 v" + driverVersion + " ASCOM Driver";
         internal static string driverLLversion = "";
         internal static string driverFirmwareVersion = "";
@@ -164,7 +167,7 @@ namespace ASCOM.cam86
         internal static string TECcoolingMaxPowerPercentDefault = "100";
         internal static string TECcoolingStartingPowerPercentDefault = "60";
         internal static string settingsWindowLocationDefault = "0,0";
-        internal static string settingsWindowOpenOnConnectDefault = "true";
+        internal static string settingsWindowOpenOnConnectDefault = "false";
         internal static string settingsWindowSizeDefault = Enum.GetName(typeof(settingsWindowSizeE), settingsWindowSizeE.cameraOnFullOptions);
         internal static string PIDproportionalGainDefault = 50.0.ToString(); // dirty way to take care of the internalisation
         internal static string PIDintegralGainDefault = 0.0.ToString(); // dirty way to take care of the internalisation
@@ -242,69 +245,840 @@ namespace ASCOM.cam86
         /// </summary>
         private static TraceLogger tl;
 
-        private const string LowLevelDLL = "cam86ll.dll";
+        const Byte COMMAND_READFRAME = 0x1b;
+        const Byte COMMAND_SHIFT3 = 0x2b;
+        const Byte COMMAND_OFF15V = 0x3b;
+        const Byte COMMAND_SET_ROISTARTY = 0x4b;
+        const Byte COMMAND_SET_ROINUMY = 0x5b;
+        const Byte COMMAND_SET_EXPOSURE = 0x6b;
+        const Byte COMMAND_SET_BINNING = 0x8b;
+        const Byte COMMAND_ONOFFCOOLER = 0x9b;
+        const Byte COMMAND_SET_TARGETTEMP = 0xab;
+        const Byte COMMAND_CLEARFRAME = 0xcb;
+        const Byte COMMAND_INITMCU = 0xdb;
+        const Byte COMMAND_SET_DELAYPERLINE = 0xeb;
+        const Byte COMMAND_SET_COOLERONDURINGREAD = 0xfb;
+        const Byte COMMAND_SET_COOLERPOWERSTART = 0x0a;
+        const Byte COMMAND_SET_COOLERPOWERMAX = 0x1a;
+        const Byte COMMAND_SET_PIDKP = 0x2a;
+        const Byte COMMAND_SET_PIDKI = 0x3a;
+        const Byte COMMAND_SET_PIDKD = 0x4a;
+        const Byte COMMAND_GET_CASETEMP = 0xf1;
+        const Byte COMMAND_GET_CASEHUM = 0xf2;
+        const Byte COMMAND_GET_CCDTEMP = 0xbf;
+        const Byte COMMAND_GET_TARGETTEMP = 0xbe;
+        const Byte COMMAND_GET_COOLERSTATUS = 0xbd;
+        const Byte COMMAND_GET_COOLERPOWER = 0xbc;
+        const Byte COMMAND_GET_VERSION = 0xbb;
+        const Byte COMMAND_GET_COOLERPOWERSTART = 0xba;
+        const Byte COMMAND_GET_COOLERPOWERMAX = 0xb9;
+        const Byte COMMAND_GET_PIDKP_LW = 0xb8;
+        const Byte COMMAND_GET_PIDKP_HW = 0xb7;
+        const Byte COMMAND_GET_PIDKI_LW = 0xb6;
+        const Byte COMMAND_GET_PIDKI_HW = 0xb5;
+        const Byte COMMAND_GET_PIDKD_LW = 0xb4;
+        const Byte COMMAND_GET_PIDKD_HW = 0xb3;
+        const int CameraWidth = 3000;
+        const int CameraHeight = 2000;
+        const Byte portfirst = 0x11;
+        static uint spusb = 20000;//bitbang speed
+        enum Camera_state
+        {
+            cameraIdle = 0,
+            cameraWaiting = 1,
+            cameraExposing = 2,
+            cameraReading = 3,
+            cameraDownload = 4,
+            cameraError = 5
+        };
+        static int TemperatureOffset = 1280;
+        static double MinErrTemp = -120.0;
+        static double MaxErrTemp = 120.0;
+        const UInt16 TRUE_INV_PROT = 0xaa55;
+        const UInt16 FALSE_INV_PROT = 0x55aa;
+        const UInt16 HIGH_MASK_PROT = 0xaa00;
+        static int[] bufim;
 
-        //Imports cam86ll.dll functions
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraConnect();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraDisconnect();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraIsConnected();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraStartExposure(int Bin, int StartX, int StartY, int NumX, int NumY, double Duration, bool light);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraStopExposure();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern int cameraGetCameraState();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraGetImageReady();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern uint cameraGetImage();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetGain(int val);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetOffset(int val);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern int cameraGetError();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern double cameraGetTemp();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetTemp(double temp);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern double cameraGetSetTemp();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraCoolingOn();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraCoolingOff();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraGetCoolerOn();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern double cameraGetCoolerPower();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetReadingTime(int readingTime);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetCoolerDuringReading(byte value);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern byte cameraGetFirmwareVersion();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern byte cameraGetLLDriverVersion();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetBiasBeforeExposure(byte value);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern double cameraGetTempDHT();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern double cameraGetHumidityDHT();
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetCoolingStartingPowerPercentage(int val);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetCoolingMaximumPowerPercentage(int val);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetPIDproportionalGain(double proportionalGain);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetPIDintegralGain(double integralGain);
-        [DllImport(LowLevelDLL, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
-        static extern bool cameraSetPIDderivativeGain(double derivativeGain);
+
+        static bool isConnected = false;
+        //static int address;
+        static int mBin;
+        static bool imageReady = false;
+        static int cameraState = 0;
+        //static int ExposureTimer;
+        static int mYn, mdeltY;
+        static int kolbyte;
+        //int eexp;
+        static byte[] siin;
+        static UInt16 siout;
+
+        static bool errorReadFlag;
+        static bool errorWriteFlag;
+
+        static Double sensorTempCache = 0;
+        static Double targetTempCache = 0;
+        static bool targetTempDirty = false;
+        static bool coolerOnCache = false;
+        static Boolean coolerOnDirty = false;
+        static Double coolerPowerCache = 0;
+        static byte firmwareVersionCache = 0;
+        static Double tempDHTCache = -127.0;
+        static Double humidityDHTCache = -1;
+        static int CoolingStartingPowerPercentageCache = -1;
+        static int CoolingMaximumPowerPercentageCache = 101;
+        static Double KpCache = 0.0;
+        static Double KiCache = 0.0;
+        static Double KdCache = 0.0;
+
+        //int exposure_time_left;
+        //int eposure_time_rollover = 900000; // 900 seconds (999 seconds is max)
+        //int exposure_time_loop_counter;
+
+
+        // used when 0s exposure image is taken to clear the sensor before real exposure
+        static bool sensorClear;
+        static FTDI cameradeviceA;
+        static FTDI cameradeviceB;
+        static System.Threading.Timer exposureTimer=null;
+        static System.Threading.Thread readoutthread;
+        public static void fillchar(ref byte[] array, int length, byte what)
+        {
+            for (var i = 0; i < length; i++)
+                array[i] = what;
+        }
+        static void AD9822(byte adr, UInt16 val)
+        {
+            const int kol = 64;
+            byte[] dan = new byte[kol];
+            fillchar(ref dan, kol, portfirst);
+            for (int i = 1; i <= 32; i++)
+                dan[i] = (byte)(dan[i] & 0xfe);
+            for (int i = 0; i <= 15; i++)
+                dan[2 * i + 2] = (byte)(dan[2 * i + 2] + 2);
+            if ((adr & 4) == 4)
+            {
+                dan[3] = (byte)(dan[3] + 4);
+                dan[4] = (byte)(dan[4] + 4);
+            }
+            if ((adr & 2) == 2)
+            {
+                dan[5] = (byte)(dan[5] + 4);
+                dan[6] = (byte)(dan[6] + 4);
+            }
+            if ((adr & 1) == 1)
+            {
+                dan[7] = (byte)(dan[7] + 4);
+                dan[8] = (byte)(dan[8] + 4);
+            }
+
+            if ((val & 256) == 256)
+            {
+                dan[15] = (byte)(dan[15] + 4);
+                dan[16] = (byte)(dan[16] + 4);
+            }
+            if ((val & 128) == 128)
+            {
+                dan[17] = (byte)(dan[17] + 4);
+                dan[18] = (byte)(dan[18] + 4);
+            }
+            if ((val & 64) == 64)
+            {
+                dan[19] = (byte)(dan[19] + 4);
+                dan[20] = (byte)(dan[20] + 4);
+            }
+            if ((val & 32) == 32)
+            {
+                dan[21] = (byte)(dan[21] + 4);
+                dan[22] = (byte)(dan[22] + 4);
+            }
+            if ((val & 16) == 16)
+            {
+                dan[23] = (byte)(dan[23] + 4);
+                dan[24] = (byte)(dan[24] + 4);
+            }
+            if ((val & 8) == 8)
+            {
+                dan[25] = (byte)(dan[25] + 4);
+                dan[26] = (byte)(dan[26] + 4);
+            }
+            if ((val & 4) == 4)
+            {
+                dan[27] = (byte)(dan[27] + 4);
+                dan[28] = (byte)(dan[28] + 4);
+            }
+            if ((val & 2) == 2)
+            {
+                dan[29] = (byte)(dan[29] + 4);
+                dan[30] = (byte)(dan[30] + 4);
+            }
+            if ((val & 1) == 1)
+            {
+                dan[31] = (byte)(dan[31] + 4);
+                dan[32] = (byte)(dan[32] + 4);
+            }
+            if (!errorWriteFlag)
+            {
+                uint numwriten = 0;
+                var state = cameradeviceB.Write(dan, kol, ref numwriten);
+                if (state == FTDI.FT_STATUS.FT_OK && numwriten == kol)
+                    errorWriteFlag = false;
+                else
+                    errorWriteFlag = true;
+            }
+        }
+        static void sleep(int t)
+        {
+            System.Threading.Thread.Sleep(t);
+        }
+        static bool cameraConnect()
+        {
+            bool FT_flag = true;
+            errorWriteFlag = false;
+            sensorTempCache = 0;
+            targetTempCache = 0;
+            targetTempDirty = false;
+            coolerOnCache = false;
+            coolerOnDirty = false;
+            coolerPowerCache = 0;
+            System.Console.Out.WriteLine("Camera Connect Called");
+            if (FT_flag)
+            {
+                cameradeviceA = new FTDI();
+                FTDI.FT_STATUS status = cameradeviceA.OpenBySerialNumber("CAM86A");
+                if (status != FTDI.FT_STATUS.FT_OK)
+                    FT_flag = false;
+            }
+            if (FT_flag)
+            {
+                cameradeviceB = new FTDI();
+                FTDI.FT_STATUS status = cameradeviceB.OpenBySerialNumber("CAM86B");
+                if (status != FTDI.FT_STATUS.FT_OK)
+                    FT_flag = false;
+            }
+            if (FT_flag)
+            {
+                FTDI.FT_STATUS status = cameradeviceB.SetBitMode(0xbf, FTDI.FT_BIT_MODES.FT_BIT_MODE_SYNC_BITBANG);
+                if (status != FTDI.FT_STATUS.FT_OK)
+                    FT_flag = false;
+            }
+            if (FT_flag)
+            {
+                cameradeviceB.SetBaudRate(spusb);
+
+                cameradeviceA.SetLatency(2);
+                cameradeviceB.SetLatency(2);
+
+                cameradeviceA.SetTimeouts(6000, 100);
+                cameradeviceB.SetTimeouts(100, 100);
+
+                cameradeviceA.InTransferSize(65536);
+
+                cameradeviceA.Purge(FTDI.FT_PURGE.FT_PURGE_RX | FTDI.FT_PURGE.FT_PURGE_TX);
+                cameradeviceB.Purge(FTDI.FT_PURGE.FT_PURGE_RX | FTDI.FT_PURGE.FT_PURGE_TX);
+
+                //address = 0;
+
+                AD9822(0, 0xd8);
+                AD9822(1, 0xa0);
+
+                cameraSetGain(0);
+
+                cameraSetOffset(-6);
+
+                sleep(100);
+
+                Spi_comm(COMMAND_INITMCU, 0);
+                sleep(100);
+
+                cameradeviceA.Purge(FTDI.FT_PURGE.FT_PURGE_RX);
+                mBin = 0;
+
+            }
+            isConnected = FT_flag;
+            errorReadFlag = false;
+            cameraState = (int)Camera_state.cameraIdle;
+            imageReady = false;
+            if (FT_flag == false)
+                cameraState = (int)Camera_state.cameraError;
+            return isConnected;
+        }
+        static bool cameraDisconnect()
+        {
+            bool FT_OP_flag = true;
+            if (cameradeviceA.Close() != FTDI.FT_STATUS.FT_OK)
+                FT_OP_flag = false;
+            if (cameradeviceB.Close() != FTDI.FT_STATUS.FT_OK)
+                FT_OP_flag = false;
+            isConnected = !FT_OP_flag;
+            return FT_OP_flag;
+        }
+        static bool cameraIsConnected()
+        {
+            return isConnected;
+        }
+        static bool cameraSetGain(int val)
+        {
+            if (val < 0 || val > 63) return false;
+            AD9822(3, (ushort)val);
+            return true;
+        }
+        static bool cameraSetOffset(int val)
+        {
+            if (val < -127 || val > 127) return false;
+            int x = (2 * val) > 0 ? (2 * val) : -(2 * val);
+            if (val < 0)
+                x += 256;
+            AD9822(6, (ushort)x);
+            return true;
+        }
+        static void Spi_comm(byte comm, UInt16 param)
+        {
+            cameradeviceB.Purge(FTDI.FT_PURGE.FT_PURGE_RX | FTDI.FT_PURGE.FT_PURGE_TX);
+            siin[0] = comm;
+            siin[1] = (byte)((param & 0xff00) >> 8);
+            siin[2] = (byte)(param & 0xff);
+            sspi();
+            sspo();
+            sleep(20);
+            tl.LogMessage("Camera", "spi cmd:0x" + siin[0].ToString("X2")+" data:0x"+ siin[1].ToString("X2") + siin[2].ToString("X2") + " ret:0x"+siout.ToString("X2"));
+        }
+        static void sspi()
+        {
+            int i, j;
+            byte b;
+            int n = 100;
+            byte[] FT_Out_Buffer = new byte[n];
+            fillchar(ref FT_Out_Buffer, n, portfirst);
+            for (j = 0; j <= 2; j++)
+            {
+                b = siin[j];
+                for (i = 0; i <= 7; i++)
+                {
+                    FT_Out_Buffer[2 * i + 1 + 16 * j] |= 0x20;
+                    if ((b & 0x80) == 0x80)
+                    {
+                        FT_Out_Buffer[2 * i + 16 * j] |= 0x80;
+                        FT_Out_Buffer[2 * i + 16 * j + 1] |= 0x80;
+                    }
+                    b <<= 1;
+                }
+            }
+            if (!errorWriteFlag)
+            {
+                uint numwriten = 0;
+                var state = cameradeviceB.Write(FT_Out_Buffer, n, ref numwriten);
+                if (state == FTDI.FT_STATUS.FT_OK && numwriten == n)
+                    errorWriteFlag = false;
+                else
+                    errorWriteFlag = true;
+            }
+        }
+        static void sspo()
+        {
+            int i;
+            UInt16 b = 0;
+            uint n = 100;
+            uint byteCnt = 0, byteExpected = n;
+            byte[] FT_In_Buffer = new byte[n];
+            if (!errorReadFlag)
+            {
+                var status = cameradeviceB.Read(FT_In_Buffer, n, ref byteCnt);
+                //tl.LogMessage("Camera", "sspo:" + byteCnt.ToString());
+                var buf = "";
+                foreach (var a in FT_In_Buffer) buf +="0x"+ a.ToString("X2")+",";
+                //tl.LogMessage("Camera", "sspo:" + FT_In_Buffer.ToString()+ buf);
+                //tl.LogMessage("Camera", "sspo:" + status.ToString());
+                if (status == FTDI.FT_STATUS.FT_OK && byteCnt == n)
+                    errorReadFlag = false;
+                else
+                    errorReadFlag = true;
+            }
+            for (i = 0; i <= 15; i++)
+            {
+
+                b <<= 1;
+                if ((FT_In_Buffer[2 * i + 2 + 16] & 0x40) != 0)
+                {
+                    b |= 1;
+                }
+            }
+            siout = b;
+            //tl.LogMessage("Camera", "sspo:got " + b.ToString("X2"));
+        }
+        static bool cameraStartExposure(int Bin, int StartX, int StartY, int NumX, int NumY, double Duration, bool light)
+        {
+            long eexp;
+            int expoz;
+            if (sensorClear)
+                cameraSensorClearFull();
+            errorReadFlag = false;
+            imageReady = false;
+            mYn = StartY / 2;
+            Spi_comm(COMMAND_SET_ROISTARTY, (UInt16)mYn);
+            mdeltY = NumY / 2;
+            Spi_comm(COMMAND_SET_ROINUMY, (UInt16)mdeltY);
+
+            if (Bin == 2)
+            {
+                kolbyte = mdeltY * 3008;
+                //bining
+                Spi_comm(COMMAND_SET_BINNING, 1);
+                mBin = 1;
+            }
+            else
+            {
+                kolbyte = mdeltY * 12008;
+                //no bining
+                Spi_comm(COMMAND_SET_BINNING, 0);
+                mBin = 0;
+            }
+            expoz = (int)(Duration * 1000 + 0.5);
+            if (expoz > 1000)
+                expoz = 1001;
+            Spi_comm(COMMAND_SET_EXPOSURE, (UInt16)expoz);
+
+            cameraState = (int)Camera_state.cameraExposing;
+            if (Duration > 1.0)
+            {
+                Spi_comm(COMMAND_SHIFT3, 0);
+                sleep(40);
+                //clear frame
+                Spi_comm(COMMAND_CLEARFRAME, 0);
+                // for time of clear frame
+                sleep(180);
+                //off 15v
+                Spi_comm(COMMAND_OFF15V, 0);
+                eexp = (int)(1000 * (Duration - 1.2) + 0.5);
+                if (eexp < 0)
+                    eexp = 0;
+                tl.LogMessage("cameraStartExposure", "start ex,eexp:"+eexp.ToString());
+                if (eexp > 0)
+                {
+                    exposureTimer = new System.Threading.Timer(readframe, null, eexp, -1);
+                }
+                else
+                {
+                    eexp = 0;
+                    readframe(null);
+                }
+            }
+            else
+            {
+                eexp = 0;
+                readframe(null);
+            }
+            return true;
+        }
+
+        static void readframe(Object state)
+        {
+            if (exposureTimer != null)
+            {
+                exposureTimer.Dispose();
+                exposureTimer = null;
+            }
+            tl.LogMessage("readframe", "readframe called");
+            cameraState = (int)Camera_state.cameraReading;
+            cameradeviceA.Purge(FTDI.FT_PURGE.FT_PURGE_TX | FTDI.FT_PURGE.FT_PURGE_RX);
+            readoutthread = new Thread(new ThreadStart(readthread));
+            readoutthread.Start();
+            Spi_comm(COMMAND_READFRAME, 0);
+        }
+        static readonly byte[] BitReverseTable256 ={
+          0x00, 0x80, 0x40, 0xC0, 0x20, 0xA0, 0x60, 0xE0, 0x10, 0x90, 0x50, 0xD0, 0x30, 0xB0, 0x70, 0xF0,
+          0x08, 0x88, 0x48, 0xC8, 0x28, 0xA8, 0x68, 0xE8, 0x18, 0x98, 0x58, 0xD8, 0x38, 0xB8, 0x78, 0xF8,
+          0x04, 0x84, 0x44, 0xC4, 0x24, 0xA4, 0x64, 0xE4, 0x14, 0x94, 0x54, 0xD4, 0x34, 0xB4, 0x74, 0xF4,
+          0x0C, 0x8C, 0x4C, 0xCC, 0x2C, 0xAC, 0x6C, 0xEC, 0x1C, 0x9C, 0x5C, 0xDC, 0x3C, 0xBC, 0x7C, 0xFC,
+          0x02, 0x82, 0x42, 0xC2, 0x22, 0xA2, 0x62, 0xE2, 0x12, 0x92, 0x52, 0xD2, 0x32, 0xB2, 0x72, 0xF2,
+          0x0A, 0x8A, 0x4A, 0xCA, 0x2A, 0xAA, 0x6A, 0xEA, 0x1A, 0x9A, 0x5A, 0xDA, 0x3A, 0xBA, 0x7A, 0xFA,
+          0x06, 0x86, 0x46, 0xC6, 0x26, 0xA6, 0x66, 0xE6, 0x16, 0x96, 0x56, 0xD6, 0x36, 0xB6, 0x76, 0xF6,
+          0x0E, 0x8E, 0x4E, 0xCE, 0x2E, 0xAE, 0x6E, 0xEE, 0x1E, 0x9E, 0x5E, 0xDE, 0x3E, 0xBE, 0x7E, 0xFE,
+          0x01, 0x81, 0x41, 0xC1, 0x21, 0xA1, 0x61, 0xE1, 0x11, 0x91, 0x51, 0xD1, 0x31, 0xB1, 0x71, 0xF1,
+          0x09, 0x89, 0x49, 0xC9, 0x29, 0xA9, 0x69, 0xE9, 0x19, 0x99, 0x59, 0xD9, 0x39, 0xB9, 0x79, 0xF9,
+          0x05, 0x85, 0x45, 0xC5, 0x25, 0xA5, 0x65, 0xE5, 0x15, 0x95, 0x55, 0xD5, 0x35, 0xB5, 0x75, 0xF5,
+          0x0D, 0x8D, 0x4D, 0xCD, 0x2D, 0xAD, 0x6D, 0xED, 0x1D, 0x9D, 0x5D, 0xDD, 0x3D, 0xBD, 0x7D, 0xFD,
+          0x03, 0x83, 0x43, 0xC3, 0x23, 0xA3, 0x63, 0xE3, 0x13, 0x93, 0x53, 0xD3, 0x33, 0xB3, 0x73, 0xF3,
+          0x0B, 0x8B, 0x4B, 0xCB, 0x2B, 0xAB, 0x6B, 0xEB, 0x1B, 0x9B, 0x5B, 0xDB, 0x3B, 0xBB, 0x7B, 0xFB,
+          0x07, 0x87, 0x47, 0xC7, 0x27, 0xA7, 0x67, 0xE7, 0x17, 0x97, 0x57, 0xD7, 0x37, 0xB7, 0x77, 0xF7,
+          0x0F, 0x8F, 0x4F, 0xCF, 0x2F, 0xAF, 0x6F, 0xEF, 0x1F, 0x9F, 0x5F, 0xDF, 0x3F, 0xBF, 0x7F, 0xFF
+        };
+        static void readthread()
+        {
+            tl.LogMessage("readthread", "readthread called");
+            uint byteExpected = (uint)kolbyte;
+            byte[] imgdata = new byte[byteExpected+16];
+            //UInt16[] imgdata = new UInt16[byteExpected/2];
+            
+            if (!errorWriteFlag)
+            {
+                uint numread = 0;
+                var state = cameradeviceA.Read(imgdata, byteExpected, ref numread);
+                Buffer.BlockCopy(imgdata, 0, imgdata, 0, (int)byteExpected);
+                tl.LogMessage("readthread", state.ToString()+","+numread.ToString()+"/"+byteExpected.ToString());
+                if (state == FTDI.FT_STATUS.FT_OK && numread == byteExpected)
+                {
+                    errorReadFlag = false;
+                    tl.LogMessage("readthread","parsing");
+                    if (mBin == 0)
+                    {
+                        for (int y = 0; y < mdeltY; y++)
+                        {
+                            for (int x = 0; x < 1500; x++)
+                            {
+                                //bufim[2 * x + 0 + (2 * (y + mYn) + 0) * 3000] = BitReverseTable256[imgdata[4 * x + 4 + y * 6004]];
+                                //bufim[2 * x + 0 + (2 * (y + mYn) + 1) * 3000] = BitReverseTable256[imgdata[4 * x + 5 + y * 6004]];
+                                //bufim[2 * x + 1 + (2 * (y + mYn) + 1) * 3000] = BitReverseTable256[imgdata[4 * x + 6 + y * 6004]];
+                                //bufim[2 * x + 1 + (2 * (y + mYn) + 0) * 3000] = BitReverseTable256[imgdata[4 * x + 7 + y * 6004]];
+                                bufim[2 * x + 0 + (2 * (y + mYn) + 0) * 3000] = imgdata[8 * x + 8 + y * 12008] << 8;
+                                bufim[2 * x + 0 + (2 * (y + mYn) + 0) * 3000] += imgdata[8 * x + 9 + y * 12008];
+                                bufim[2 * x + 0 + (2 * (y + mYn) + 1) * 3000] = imgdata[8 * x + 10 + y * 12008] << 8;
+                                bufim[2 * x + 0 + (2 * (y + mYn) + 1) * 3000] += imgdata[8 * x + 11 + y * 12008];
+                                bufim[2 * x + 1 + (2 * (y + mYn) + 1) * 3000] = imgdata[8 * x + 12 + y * 12008] << 8;
+                                bufim[2 * x + 1 + (2 * (y + mYn) + 1) * 3000] += imgdata[8 * x + 13 + y * 12008];
+                                bufim[2 * x + 1 + (2 * (y + mYn) + 0) * 3000] = imgdata[8 * x + 14 + y * 12008] << 8;
+                                bufim[2 * x + 1 + (2 * (y + mYn) + 0) * 3000] += imgdata[8 * x + 15 + y * 12008];
+
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (int y = 0; y < mdeltY; y++)
+                        {
+                            int temp;
+                            for (int _x = 0; _x < 1499; _x++)
+                            {
+                                temp = imgdata[(_x + 7 + y * 1504) * 2 + 0] << 8;
+                                temp+= imgdata[(_x + 7 + y * 1504) * 2 + 1];
+                                bufim[2 * _x + 0 + (2 * (y + mYn) + 0) * 3000] = temp;
+                                bufim[2 * _x + 0 + (2 * (y + mYn) + 1) * 3000] = temp;
+                                bufim[2 * _x + 1 + (2 * (y + mYn) + 1) * 3000] = temp;
+                                bufim[2 * _x + 1 + (2 * (y + mYn) + 0) * 3000] = temp;
+                            }
+                            int x = 1499;
+                            temp = imgdata[(x + 6 + y * 1504) * 2 + 0] << 8;
+                            temp += imgdata[(x + 6 + y * 1504) * 2 + 1];
+                            bufim[2 * x + 0 + (2 * (y + mYn) + 0) * 3000] = temp;
+                            bufim[2 * x + 0 + (2 * (y + mYn) + 1) * 3000] = temp;
+                            bufim[2 * x + 1 + (2 * (y + mYn) + 1) * 3000] = temp;
+                            bufim[2 * x + 1 + (2 * (y + mYn) + 0) * 3000] = temp;
+                        }
+                    }
+                    tl.LogMessage("readthread", "parsing done");
+                }
+                else
+                {
+                    tl.LogMessage("readthread", "read failed");
+                    errorReadFlag = true;
+                    cameradeviceA.Purge(FTDI.FT_PURGE.FT_PURGE_TX | FTDI.FT_PURGE.FT_PURGE_RX);
+                }
+
+            }
+            if (sensorClear == true)
+            {
+                imageReady = false;
+                sensorClear = false;
+            }
+            else
+            {
+                imageReady = true;
+            }
+            tl.LogMessage("readthread", "image ready:"+imageReady.ToString());
+            cameraState = (int)Camera_state.cameraIdle;
+
+            if (targetTempDirty)
+            {
+                cameraSetTemp(targetTempCache);
+                targetTempDirty = false;
+            }
+            if (coolerOnDirty)
+            {
+                if (coolerOnCache)
+                    cameraCoolingOn();
+                else
+                    cameraCoolingOff();
+                coolerOnDirty = false;
+            }
+        }
+        static void cameraSensorClearFull()
+        {
+            errorReadFlag = false;
+            imageReady = false;
+            mYn = 0;
+            Spi_comm(COMMAND_SET_ROISTARTY, (UInt16)mYn);
+            mdeltY = CameraHeight / 2;
+            Spi_comm(COMMAND_SET_ROINUMY, (UInt16)mdeltY);
+
+            // use 2x2 binning to increase the reading speed
+            // the image will be deleted anyway
+            kolbyte = mdeltY * 3008;
+            //bining
+            Spi_comm(COMMAND_SET_BINNING, 1);
+            mBin = 1;
+
+            Spi_comm(COMMAND_SET_EXPOSURE, (UInt16)0);
+
+            cameraState = (int)Camera_state.cameraExposing;
+
+            readframe(null);
+
+            // wait until the bias frame has been read - we will discard the data
+            // This will lock this main thread for a short time... not sure if this is a good thing?
+            // this seems to take 1600 ms
+            while (sensorClear == true)
+                sleep(10);
+        }
+        static bool cameraStopExposure()
+        {
+            if (exposureTimer != null)
+            {
+                exposureTimer.Dispose();
+                exposureTimer = null;
+            }
+            if (cameraState == (int)Camera_state.cameraExposing)
+                readframe(null);
+            return true;
+        }
+        static int cameraGetCameraState()
+        {
+            if (!errorWriteFlag)
+                return cameraState;
+            else
+                return (int)Camera_state.cameraError;
+        }
+        static bool cameraGetImageReady()
+        {
+            return imageReady;
+        }
+        static int[] cameraGetImage()
+        {
+            cameraState = (int)Camera_state.cameraDownload;
+            cameraState = (int)Camera_state.cameraIdle;
+            return bufim;
+        }
+        static int cameraGetError()
+        {
+            int res = 0;
+            if (errorWriteFlag) res = res + 2;
+            if (errorReadFlag) res = res + 1;
+            return res;
+        }
+        static double cameraGetTemp()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return sensorTempCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_CCDTEMP, 0);
+                double temp = (siout - TemperatureOffset) / 10.0;
+                if ((temp > MaxErrTemp) || (temp < MinErrTemp))
+                {
+                    temp = sensorTempCache;
+                }
+                sensorTempCache = temp;
+                return temp;
+            }
+        }
+        static bool cameraSetTemp(double temp)
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                targetTempCache = temp;
+                targetTempDirty = true;
+            }
+            else
+            {
+                ushort d0 = (ushort)(TemperatureOffset + (temp * 10 + 0.5));
+                Spi_comm(COMMAND_SET_TARGETTEMP, d0);
+                targetTempDirty = false;
+            }
+            return true;
+        }
+        static double cameraGetSetTemp()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return targetTempCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_TARGETTEMP, 0);
+                double temp = (siout - TemperatureOffset) / 10.0;
+                if ((temp > MaxErrTemp) || (temp < MinErrTemp))
+                {
+                    temp = targetTempCache;
+                }
+                targetTempCache = temp;
+                return temp;
+            }
+        }
+        static bool cameraCoolingOn()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                coolerOnCache = true;
+                coolerOnDirty = true;
+            }
+            else
+            {
+                Spi_comm(COMMAND_ONOFFCOOLER, 1);
+            }
+            return true;
+        }
+        static bool cameraCoolingOff()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                coolerOnCache = false;
+                coolerOnDirty = true;
+            }
+            else
+            {
+                Spi_comm(COMMAND_ONOFFCOOLER, 0);
+            }
+            return true;
+        }
+        static bool cameraGetCoolerOn()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return coolerOnCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_COOLERSTATUS, 0);
+                if (siout == TRUE_INV_PROT)
+                {
+                    coolerOnCache = true;
+                    return true;
+                }
+                else if (siout == FALSE_INV_PROT)
+                {
+                    coolerOnCache = false;
+                    return false;
+                }
+                else
+                {
+                    return coolerOnCache;
+                }
+            }
+        }
+        static double cameraGetCoolerPower()
+        {
+            double power;
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return coolerPowerCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_COOLERPOWER, 0);
+                if ((siout >> 8) == (HIGH_MASK_PROT >> 8))
+                {
+                    power = (siout & 0x00ff) / 2.55;
+                }
+                else
+                {
+                    power = coolerPowerCache;
+                }
+                coolerPowerCache = power;
+                return power;
+            }
+        }
+        static bool cameraSetReadingTime(int readingTime)
+        {
+            Spi_comm(COMMAND_SET_DELAYPERLINE, (ushort)readingTime);
+            return true;
+        }
+        static bool cameraSetCoolerDuringReading(byte value)
+        {
+            Spi_comm(COMMAND_SET_COOLERONDURINGREAD, value);
+            return true;
+        }
+        static byte cameraGetFirmwareVersion()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return firmwareVersionCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_VERSION, 0);
+                firmwareVersionCache = (byte)(siout & 0xff);
+                return firmwareVersionCache;
+            }
+        }
+        static byte cameraGetLLDriverVersion()
+        {
+            return 96;//softwareLLDriverVersion;
+        }
+        static bool cameraSetBiasBeforeExposure(byte value)
+        {
+            sensorClear= (value!=0);
+            return true;
+        }
+        static double cameraGetTempDHT()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return tempDHTCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_CASETEMP, 0);
+                tempDHTCache = (siout - TemperatureOffset) / 10.0;
+                return tempDHTCache;
+            }
+        }
+        static double cameraGetHumidityDHT()
+        {
+            if ((cameraState == (int)Camera_state.cameraReading) || (cameraState == (int)Camera_state.cameraDownload))
+            {
+                return humidityDHTCache;
+            }
+            else
+            {
+                Spi_comm(COMMAND_GET_CASEHUM, 0);
+                humidityDHTCache= (siout) / 10.0;
+                return humidityDHTCache;
+            }
+        }
+        static bool cameraSetCoolingStartingPowerPercentage(int val)
+        {
+            Spi_comm(COMMAND_SET_COOLERPOWERSTART, (ushort)val);
+            CoolingStartingPowerPercentageCache = val;
+            return true;
+        }
+        static bool cameraSetCoolingMaximumPowerPercentage(int val)
+        {
+            Spi_comm(COMMAND_SET_COOLERPOWERMAX, (ushort)val);
+            CoolingMaximumPowerPercentageCache = val;
+            return true;
+        }
+        static bool cameraSetPIDproportionalGain(double proportionalGain)
+        {
+            ushort value = proportionalGain > 0 ? (ushort)(proportionalGain * 100.0) : (ushort)-(ushort)(-proportionalGain * 100.0);
+            Spi_comm(COMMAND_SET_PIDKP, value);
+            KpCache= proportionalGain;
+            return true;
+        }
+        static bool cameraSetPIDintegralGain(double integralGain)
+        {
+            ushort value = integralGain > 0 ? (ushort)(integralGain * 100.0) : (ushort)-(ushort)(-integralGain * 100.0);
+            Spi_comm(COMMAND_SET_PIDKI, value);
+            KiCache = integralGain;
+            return true;
+        }
+        static bool cameraSetPIDderivativeGain(double derivativeGain)
+        {
+            ushort value = derivativeGain > 0 ? (ushort)(derivativeGain * 100.0) : (ushort)-(ushort)(-derivativeGain * 100.0);
+            Spi_comm(COMMAND_SET_PIDKD, value);
+            KdCache = derivativeGain;
+            return true;
+        }
+        private const string LowLevelDLL = "cam86.net by tinylib";
 
         /// <summary>
         /// Initializes a new instance of the <see cref="cam86"/> class.
@@ -312,10 +1086,13 @@ namespace ASCOM.cam86
         /// </summary>
         public Camera()
         {
+            bufim = new int[CameraWidth * CameraHeight];
+            siin = new byte[4];
+
             // Read device configuration from the ASCOM Profile store
             ReadProfile();
             //Init debug logger
-            tl = new TraceLogger("", "cam86");
+            tl = new TraceLogger("D:\\cam86.log", "cam86");
             tl.Enabled = traceState;
             tl.LogMessage("Camera", "Starting initialisation");
             // Initialise connected to false
@@ -333,16 +1110,15 @@ namespace ASCOM.cam86
             driverFirmwareVersion = "0";
 
             // used for reading of the DHT sensor
-            DHTTimer.Elapsed += new ElapsedEventHandler(OnDHTTimedEvent);
-            DHTTimer.Interval = 10000; // update every 10 seconds
-            DHTTimer.Enabled = false;
+            //DHTTimer.Elapsed += new ElapsedEventHandler(OnDHTTimedEvent);
+            //DHTTimer.Interval = 10000; // update every 10 seconds
+            //DHTTimer.Enabled = false;
 
             tl.LogMessage("Camera", "Completed initialisation");
         }
 
-
         //
-        // PUBLIC COM INTERFACE ICameraV2 IMPLEMENTATION
+        // PUBLIC COM INTERFACE ICameraV3 IMPLEMENTATION
         //
 
         #region Common properties and methods.
@@ -577,8 +1353,8 @@ namespace ASCOM.cam86
             // set by the driver wizard
             get
             {
-                tl.LogMessage("InterfaceVersion Get", "2");
-                return Convert.ToInt16("2");
+                tl.LogMessage("InterfaceVersion Get", "3");
+                return Convert.ToInt16("3");
             }
         }
 
@@ -727,9 +1503,11 @@ namespace ASCOM.cam86
                 // update only if the data needs to be displayed
                 if (setupForm != null)
                 {
-                    setupForm.updateTemperatureLabel(temp, tempCoolingPower);
+                    tl.LogMessage("CCDTemperature Get", "update");
+                    setupForm.updateTemperatureLabel(temp, tempCoolingPower,tl);
+                    tl.LogMessage("CCDTemperature Get", "update done");
                 }
-
+                tl.LogMessage("CCDTemperature Get","end");
                 return temp;
             }
         }
@@ -987,7 +1765,7 @@ namespace ASCOM.cam86
             get
             {
                 tl.LogMessage("GainMax Get", "63");
-                return 64;
+                return 63;
             }
         }
 
@@ -1009,6 +1787,52 @@ namespace ASCOM.cam86
             }
         }
 
+        public int Offset
+        {
+            get
+            {
+                tl.LogMessage("Offset Get", offsetState.ToString());
+                return offsetState;
+            }
+            set
+            {
+                if (cameraSetOffset(value) == false)
+                {
+                    tl.LogMessage("Offset", "Can't set Offset to " + value);
+                    throw new ASCOM.InvalidValueException("Can't set offset to " + value);
+                }
+
+                offsetState = (short)value;
+                tl.LogMessage("Offset Set", offsetState.ToString());
+            }
+        }
+
+        public int OffsetMax
+        {
+            get
+            {
+                tl.LogMessage("OffsetMax Get", "127");
+                return 127;
+            }
+        }
+
+        public int OffsetMin
+        {
+            get
+            {
+                tl.LogMessage("OffsetMin Get", "-127");
+                return -127;
+            }
+        }
+
+        public ArrayList Offsets
+        {
+            get
+            {
+                tl.LogMessage("Offsets Get", "Not implemented");
+                throw new ASCOM.PropertyNotImplementedException("Offsets", true);
+            }
+        }
         public bool HasShutter
         {
             get
@@ -1046,15 +1870,12 @@ namespace ASCOM.cam86
                     throw new ASCOM.InvalidOperationException("Call to ImageArray before the first image has been taken!");
                 }
 
-                uint imagepoint;
+                int[] imagepoint;
                 //Get image pointer
                 tl.LogMessage("ImageArray Get", "Call cameraGetImage from " + LowLevelDLL);
                 imagepoint = cameraGetImage();
                 unsafe
                 {
-                    int* zeropixelpoint, pixelpoint;
-                    //Set pixelpointers
-                    zeropixelpoint = pixelpoint = (int*)imagepoint;
                     //Create image array
                     cameraImageArray = new int[cameraNumX, cameraNumY];
                     int i, j;
@@ -1078,8 +1899,7 @@ namespace ASCOM.cam86
                             ci = 0;
                             for (i = cameraStartX; i < (cameraStartX + cameraNumX); i++)
                             {
-                                pixelpoint = (int*)(zeropixelpoint + (j * ccdWidth + i));
-                                int intensity = *pixelpoint;
+                                int intensity = imagepoint[j * ccdWidth + i];
                                 cameraImageArray[ci, cj] = intensity;
 
                                 if (intensity > maxPixelADU) intensity = maxPixelADU;
@@ -1120,8 +1940,7 @@ namespace ASCOM.cam86
                             ci = 0;
                             for (i = cameraStartX; i < (cameraStartX + cameraNumX); i++)
                             {
-                                pixelpoint = (int*)(zeropixelpoint + (2 * j * ccdWidth + i * 2));
-                                int intensity = *pixelpoint;
+                                int intensity = imagepoint[2 * j * ccdWidth + i * 2];
                                 cameraImageArray[ci, cj] = intensity;
 
                                 if (intensity > maxPixelADU)
@@ -1389,8 +2208,10 @@ namespace ASCOM.cam86
                 }
                 else
                 {
+                    
                     tl.LogMessage("PercentCompleted Get", "Throwing InvalidOperationException because PercentCompleted Get called when camera not exposing or reading");
-                    throw new ASCOM.InvalidOperationException("PercentCompleted");
+                    return 0;
+                    //throw new ASCOM.InvalidOperationException();
                 }
             }
         }
@@ -1802,6 +2623,8 @@ namespace ASCOM.cam86
                 return cameraConnectedState;
             }
         }
+
+        public double SubExposureDuration { get => throw new ASCOM.PropertyNotImplementedException(); set => throw new ASCOM.PropertyNotImplementedException(); }
 
         /// <summary>
         /// Use this function to throw an exception if we aren't connected to the hardware

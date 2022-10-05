@@ -24,6 +24,7 @@ using System.Text;
 using System.Windows.Forms;
 
 using FTD2XX_NET;
+using ASCOM.Utilities;
 
 namespace ASCOM.cam86
 {
@@ -264,10 +265,12 @@ namespace ASCOM.cam86
             }
         }
 
-        public void updateTemperatureLabel(double sensorTemperature, double TECcoolingPower)
+        public void updateTemperatureLabel(double sensorTemperature, double TECcoolingPower, TraceLogger l=null)
         {
+            if (l!=null) l.LogMessage("updateTemperatureLabel", "in");
             tempCCDbackup = sensorTemperature;
-            labelTemperature.Text = "T= " + sensorTemperature.ToString("F1") + " / " + ccdTemp.ToString("F1") + "C" + " (" + TECcoolingPower.ToString("F0") + "%)";
+            this.labelTemperature.Text = "T= " + sensorTemperature.ToString("F1") + " / " + ccdTemp.ToString("F1") + "C" + " (" + TECcoolingPower.ToString("F0") + "%)";
+            if (l != null) l.LogMessage("updateTemperatureLabel", "out");
         }
 
         public SetupDialogForm()
@@ -513,6 +516,7 @@ namespace ASCOM.cam86
             Camera.sensorClearBeforeExposureTimeState = (ushort)numericUpDownSensorClearTime.Value;
             Camera.coolingStartingPowerPercentState = (short)numericUpDownTECstartupPowerPercent.Value;
             Camera.coolingMaxPowerPercentState = (short)numericUpDownTECmaximumPowerPercent.Value;
+            Camera.settingsWindowOpenOnConnectState = (bool)checkBoxOpenSettingsOnConnect.Checked;
 
             Camera.gainState = (short)gainNumUpDown.Value;
             Camera.offsetState = (short)offsetNumUpDown.Value;
